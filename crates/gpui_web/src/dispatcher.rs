@@ -1,6 +1,5 @@
 use gpui::{
     PlatformDispatcher, Priority, PriorityQueueReceiver, PriorityQueueSender, RunnableVariant,
-    ThreadTaskTimings,
 };
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
@@ -184,10 +183,6 @@ impl WebDispatcher {
                                     }
                                 };
 
-                                if runnable.metadata().is_closed() {
-                                    continue;
-                                }
-
                                 runnable.run();
                             }
                         })
@@ -215,20 +210,6 @@ impl WebDispatcher {
 }
 
 impl PlatformDispatcher for WebDispatcher {
-    fn get_all_timings(&self) -> Vec<ThreadTaskTimings> {
-        // TODO-Wasm: should we panic here?
-        Vec::new()
-    }
-
-    fn get_current_thread_timings(&self) -> ThreadTaskTimings {
-        ThreadTaskTimings {
-            thread_name: None,
-            thread_id: std::thread::current().id(),
-            timings: Vec::new(),
-            total_pushed: 0,
-        }
-    }
-
     fn is_main_thread(&self) -> bool {
         self.on_main_thread()
     }
@@ -263,9 +244,7 @@ impl PlatformDispatcher for WebDispatcher {
         let millis = duration.as_millis().min(i32::MAX as u128) as i32;
         if self.on_main_thread() {
             let callback = Closure::once_into_js(move || {
-                if !runnable.metadata().is_closed() {
-                    runnable.run();
-                }
+                runnable.run();
             });
             self.browser_window
                 .set_timeout_with_callback_and_timeout_and_arguments_0(
@@ -300,15 +279,11 @@ impl PlatformDispatcher for WebDispatcher {
 fn execute_on_main_thread(window: &web_sys::Window, item: MainThreadItem) {
     match item {
         MainThreadItem::Runnable(runnable) => {
-            if !runnable.metadata().is_closed() {
-                runnable.run();
-            }
+            runnable.run();
         }
         MainThreadItem::Delayed { runnable, millis } => {
             let callback = Closure::once_into_js(move || {
-                if !runnable.metadata().is_closed() {
-                    runnable.run();
-                }
+                runnable.run();
             });
             window
                 .set_timeout_with_callback_and_timeout_and_arguments_0(
@@ -325,9 +300,7 @@ fn execute_on_main_thread(window: &web_sys::Window, item: MainThreadItem) {
 
 fn schedule_runnable(window: &web_sys::Window, runnable: RunnableVariant, priority: Priority) {
     let callback = Closure::once_into_js(move || {
-        if !runnable.metadata().is_closed() {
-            runnable.run();
-        }
+        runnable.run();
     });
     let callback: &js_sys::Function = callback.unchecked_ref();
 

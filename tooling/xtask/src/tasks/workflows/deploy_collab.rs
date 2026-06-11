@@ -3,7 +3,7 @@ use indoc::indoc;
 
 use crate::tasks::workflows::runners::{self, Platform};
 use crate::tasks::workflows::steps::{
-    self, CommonJobConditions, FluentBuilder as _, NamedJob, dependant_job, named,
+    self, CommonJobConditions, FluentBuilder as _, NamedJob, dependant_job, named, use_clang,
 };
 use crate::tasks::workflows::vars;
 
@@ -23,7 +23,7 @@ pub(crate) fn deploy_collab() -> Workflow {
 }
 
 fn style() -> NamedJob {
-    named::job(
+    named::job(use_clang(
         dependant_job(&[])
             .name("Check formatting and Clippy lints")
             .with_repository_owner_guard()
@@ -33,8 +33,8 @@ fn style() -> NamedJob {
             .add_step(steps::cache_rust_dependencies_namespace())
             .map(steps::install_linux_dependencies)
             .add_step(steps::cargo_fmt())
-            .add_step(steps::clippy(Platform::Linux)),
-    )
+            .add_step(steps::clippy(Platform::Linux, None)),
+    ))
 }
 
 fn tests(deps: &[&NamedJob]) -> NamedJob {
@@ -42,13 +42,13 @@ fn tests(deps: &[&NamedJob]) -> NamedJob {
         named::bash("cargo nextest run --package collab --no-fail-fast")
     }
 
-    named::job(
+    named::job(use_clang(
         dependant_job(deps)
             .name("Run tests")
             .runs_on(runners::LINUX_XL)
             .add_service(
                 "postgres",
-                Container::new("postgres:15")
+                Container::new("postgres:15@sha256:1b92e7a80c021647bf70f5d3eb66066a998e4f5cf43c07bb9dc9f729782cf88e")
                     .add_env(("POSTGRES_HOST_AUTH_METHOD", "trust"))
                     .ports(vec![Port::Name("5432:5432".into())])
                     .options(
@@ -65,13 +65,17 @@ fn tests(deps: &[&NamedJob]) -> NamedJob {
             .add_step(steps::cargo_install_nextest())
             .add_step(steps::clear_target_dir_if_large(Platform::Linux))
             .add_step(run_collab_tests()),
-    )
+    ))
 }
 
 fn publish(deps: &[&NamedJob]) -> NamedJob {
     fn install_doctl() -> Step<Use> {
-        named::uses("digitalocean", "action-doctl", "v2")
-            .add_with(("token", vars::DIGITALOCEAN_ACCESS_TOKEN))
+        named::uses(
+            "digitalocean",
+            "action-doctl",
+            "3cb3953159719656269e044e0e24ca16dd2a690f", // v2.5.2
+        )
+        .add_with(("token", vars::DIGITALOCEAN_ACCESS_TOKEN))
     }
 
     fn sign_into_registry() -> Step<Run> {
@@ -110,8 +114,12 @@ fn publish(deps: &[&NamedJob]) -> NamedJob {
 
 fn deploy(deps: &[&NamedJob]) -> NamedJob {
     fn install_doctl() -> Step<Use> {
-        named::uses("digitalocean", "action-doctl", "v2")
-            .add_with(("token", vars::DIGITALOCEAN_ACCESS_TOKEN))
+        named::uses(
+            "digitalocean",
+            "action-doctl",
+            "3cb3953159719656269e044e0e24ca16dd2a690f", // v2.5.2
+        )
+        .add_with(("token", vars::DIGITALOCEAN_ACCESS_TOKEN))
     }
 
     fn sign_into_kubernetes() -> Step<Run> {

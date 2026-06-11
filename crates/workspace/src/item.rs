@@ -9,13 +9,14 @@ use crate::{
 };
 use anyhow::Result;
 use client::{Client, proto};
-use futures::{StreamExt, channel::mpsc};
+use futures::channel::mpsc;
 use gpui::{
     Action, AnyElement, AnyEntity, AnyView, App, AppContext, Context, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, Font, HighlightStyle, Pixels, Point, Render,
-    SharedString, Task, WeakEntity, Window,
+    EventEmitter, FocusHandle, Focusable, Font, Pixels, Point, Render, SharedString, Task, TaskExt,
+    WeakEntity, Window,
 };
 use language::Capability;
+pub use language::HighlightedText;
 use project::{Project, ProjectEntryId, ProjectPath};
 pub use settings::{
     ActivateOnClose, ClosePosition, RegisterSetting, Settings, SettingsLocation, ShowCloseButton,
@@ -25,7 +26,6 @@ use smallvec::SmallVec;
 use std::{
     any::{Any, TypeId},
     cell::RefCell,
-    ops::Range,
     path::Path,
     rc::Rc,
     sync::Arc,
@@ -39,6 +39,7 @@ pub const LEADER_UPDATE_THROTTLE: Duration = Duration::from_millis(200);
 #[derive(Clone, Copy, Debug)]
 pub struct SaveOptions {
     pub format: bool,
+    pub force_format: bool,
     pub autosave: bool,
 }
 
@@ -46,6 +47,7 @@ impl Default for SaveOptions {
     fn default() -> Self {
         Self {
             format: true,
+            force_format: false,
             autosave: false,
         }
     }
@@ -124,14 +126,6 @@ pub enum ItemEvent {
     Edit,
 }
 
-// TODO: Combine this with existing HighlightedText struct?
-#[derive(Debug)]
-pub struct BreadcrumbText {
-    pub text: String,
-    pub highlights: Option<Vec<(Range<usize>, HighlightStyle)>>,
-    pub font: Option<Font>,
-}
-
 #[derive(Clone, Copy, Default, Debug)]
 pub struct TabContentParams {
     pub detail: Option<usize>,
@@ -139,6 +133,9 @@ pub struct TabContentParams {
     pub preview: bool,
     /// Tab content should be deemphasized when active pane does not have focus.
     pub deemphasized: bool,
+    /// Maximum character length for the title. None = use the item's own default (typically MAX_TAB_TITLE_LEN).
+    pub max_title_len: Option<usize>,
+    pub truncate_title_middle: bool,
 }
 
 impl TabContentParams {
@@ -243,6 +240,24 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
     fn buffer_kind(&self, _cx: &App) -> ItemBufferKind {
         ItemBufferKind::None
     }
+
+    /// Returns the project path that should be treated as active for this item.
+    ///
+    /// Singleton items use their only project item by default. Items backed by
+    /// multiple buffers should override this to return the path for the buffer
+    /// under the primary cursor or otherwise selected sub-item.
+    fn active_project_path(&self, cx: &App) -> Option<ProjectPath> {
+        if self.buffer_kind(cx) != ItemBufferKind::Singleton {
+            return None;
+        }
+
+        let mut result = None;
+        self.for_each_project_item(cx, &mut |_, item| {
+            result = item.project_path(cx);
+        });
+        result
+    }
+
     fn set_nav_history(&mut self, _: ItemNavHistory, _window: &mut Window, _: &mut Context<Self>) {}
 
     fn can_split(&self) -> bool {
@@ -329,7 +344,7 @@ pub trait Item: Focusable + EventEmitter<Self::Event> + Render + Sized {
         ToolbarItemLocation::Hidden
     }
 
-    fn breadcrumbs(&self, _cx: &App) -> Option<Vec<BreadcrumbText>> {
+    fn breadcrumbs(&self, _cx: &App) -> Option<(Vec<HighlightedText>, Option<Font>)> {
         None
     }
 
@@ -548,7 +563,7 @@ pub trait ItemHandle: 'static + Send {
     ) -> gpui::Subscription;
     fn to_searchable_item_handle(&self, cx: &App) -> Option<Box<dyn SearchableItemHandle>>;
     fn breadcrumb_location(&self, cx: &App) -> ToolbarItemLocation;
-    fn breadcrumbs(&self, cx: &App) -> Option<Vec<BreadcrumbText>>;
+    fn breadcrumbs(&self, cx: &App) -> Option<(Vec<HighlightedText>, Option<Font>)>;
     fn breadcrumb_prefix(&self, window: &mut Window, cx: &mut App) -> Option<gpui::AnyElement>;
     fn show_toolbar(&self, cx: &App) -> bool;
     fn pixel_position_of_cursor(&self, cx: &App) -> Option<Point<Pixels>>;
@@ -652,14 +667,7 @@ impl<T: Item> ItemHandle for Entity<T> {
     }
 
     fn project_path(&self, cx: &App) -> Option<ProjectPath> {
-        let this = self.read(cx);
-        let mut result = None;
-        if this.buffer_kind(cx) == ItemBufferKind::Singleton {
-            this.for_each_project_item(cx, &mut |_, item| {
-                result = item.project_path(cx);
-            });
-        }
-        result
+        <T as Item>::active_project_path(self.read(cx), cx)
     }
 
     fn workspace_settings<'a>(&self, cx: &'a App) -> &'a WorkspaceSettings {
@@ -785,8 +793,8 @@ impl<T: Item> ItemHandle for Entity<T> {
                 send_follower_updates = Some(cx.spawn_in(window, {
                     let pending_update = pending_update.clone();
                     async move |workspace, cx| {
-                        while let Some(mut leader_id) = pending_update_rx.next().await {
-                            while let Ok(Some(id)) = pending_update_rx.try_next() {
+                        while let Ok(mut leader_id) = pending_update_rx.recv().await {
+                            while let Ok(id) = pending_update_rx.try_recv() {
                                 leader_id = id;
                             }
 
@@ -916,6 +924,16 @@ impl<T: Item> ItemHandle for Entity<T> {
                             }
                         }
 
+                        ItemEvent::UpdateBreadcrumbs => {
+                            if &pane == workspace.active_pane()
+                                && pane.read(cx).active_item().is_some_and(|active_item| {
+                                    active_item.item_id() == item.item_id()
+                                })
+                            {
+                                workspace.active_item_path_changed(false, window, cx);
+                            }
+                        }
+
                         ItemEvent::Edit => {
                             let autosave = item.workspace_settings(cx).autosave;
 
@@ -938,8 +956,6 @@ impl<T: Item> ItemHandle for Entity<T> {
                             }
                             pane.update(cx, |pane, cx| pane.handle_item_edit(item.item_id(), cx));
                         }
-
-                        _ => {}
                     });
                 },
             ));
@@ -954,15 +970,28 @@ impl<T: Item> ItemHandle for Entity<T> {
                         // Only trigger autosave if focus has truly left the item.
                         // If focus is still within the item's hierarchy (e.g., moved to a context menu),
                         // don't trigger autosave to avoid unwanted formatting and cursor jumps.
-                        // Also skip autosave if focus moved to a modal (e.g., command palette),
-                        // since the user is still interacting with the workspace.
                         let focus_handle = item.item_focus_handle(cx);
-                        if !focus_handle.contains_focused(window, cx)
-                            && !workspace.has_active_modal(window, cx)
-                        {
-                            Pane::autosave_item(&item, workspace.project.clone(), window, cx)
-                                .detach_and_log_err(cx);
+                        if focus_handle.contains_focused(window, cx) {
+                            return;
                         }
+
+                        // Add the item to a deferred save list. The actual save will happen when
+                        // focus lands on a pane or panel (via handle_pane_focused or
+                        // handle_panel_focused), or when the window deactivates.
+                        // This avoids saving when opening modals and skips saving if focus
+                        // returns to the same item.
+                        workspace.deferred_save_items.push(item.downgrade_item());
+
+                        // Defer the flush to ensure all focus events are processed first.
+                        // This is needed because on_focus_out fires before handle_pane_focused
+                        // when switching items.
+                        cx.defer_in(window, |workspace, window, cx| {
+                            // Don't flush if a modal is active - the user might return
+                            // to the original item when the modal is dismissed.
+                            if !workspace.has_active_modal(window, cx) {
+                                workspace.flush_deferred_saves(window, cx);
+                            }
+                        });
                     }
                 },
             )
@@ -1090,7 +1119,7 @@ impl<T: Item> ItemHandle for Entity<T> {
         self.read(cx).breadcrumb_location(cx)
     }
 
-    fn breadcrumbs(&self, cx: &App) -> Option<Vec<BreadcrumbText>> {
+    fn breadcrumbs(&self, cx: &App) -> Option<(Vec<HighlightedText>, Option<Font>)> {
         self.read(cx).breadcrumbs(cx)
     }
 
@@ -1464,9 +1493,18 @@ pub mod test {
 
     impl TestProjectItem {
         pub fn new(id: u64, path: &str, cx: &mut App) -> Entity<Self> {
+            Self::new_in_worktree(id, path, WorktreeId::from_usize(0), cx)
+        }
+
+        pub fn new_in_worktree(
+            id: u64,
+            path: &str,
+            worktree_id: WorktreeId,
+            cx: &mut App,
+        ) -> Entity<Self> {
             let entry_id = Some(ProjectEntryId::from_proto(id));
             let project_path = Some(ProjectPath {
-                worktree_id: WorktreeId::from_usize(0),
+                worktree_id,
                 path: rel_path(path).into(),
             });
             cx.new(|_| Self {
@@ -1577,7 +1615,7 @@ pub mod test {
 
         fn push_to_nav_history(&mut self, cx: &mut Context<Self>) {
             if let Some(history) = &mut self.nav_history {
-                history.push(Some(Box::new(self.state.clone())), cx);
+                history.push(Some(Box::new(self.state.clone())), None, cx);
             }
         }
     }

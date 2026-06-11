@@ -52,7 +52,7 @@ TBD: Document `language_name/config.toml` keys
 
 ## Grammar
 
-Zed uses the [Tree-sitter](https://tree-sitter.github.io) parsing library to provide built-in language-specific features. There are grammars available for many languages, and you can also [develop your own grammar](https://tree-sitter.github.io/tree-sitter/creating-parsers#writing-the-grammar). A growing list of Zed features are built using pattern matching over syntax trees with Tree-sitter queries. As mentioned above, every language that is defined in an extension must specify the name of a Tree-sitter grammar that is used for parsing. These grammars are then registered separately in extensions' `extension.toml` file, like this:
+Zed uses the [Tree-sitter](https://tree-sitter.github.io) parsing library to provide built-in language-specific features. There are grammars available for many languages, and you can also [develop your own grammar](https://tree-sitter.github.io/tree-sitter/creating-parsers/3-writing-the-grammar.html). A growing list of Zed features are built using pattern matching over syntax trees with Tree-sitter queries. As mentioned above, every language that is defined in an extension must specify the name of a Tree-sitter grammar that is used for parsing. These grammars are then registered separately in extensions' `extension.toml` file, like this:
 
 ```toml
 [grammars.gleam]
@@ -142,6 +142,21 @@ This query marks strings, object keys, and numbers for highlighting. The followi
 | @variable.special        | Captures special variables             |
 | @variable.parameter      | Captures function/method parameters    |
 | @variant                 | Captures variants                      |
+
+#### Fallback captures
+
+A single Tree-sitter pattern can specify multiple captures on the same node to define fallback highlights.
+Zed resolves them right-to-left: It first tries the rightmost capture, and if the current theme has no style for it, falls back to the next capture to the left, and so on.
+
+For example:
+
+```scheme
+(type_identifier) @type @variable
+```
+
+Here Zed will first try to resolve `@variable` from the theme. If the theme defines a style for `@variable`, that style is used. Otherwise, Zed falls back to `@type`.
+
+This is useful when a language wants to provide a preferred highlight that not all themes may support, while still falling back to a more common capture that most themes define.
 
 ### Bracket matching
 
@@ -513,7 +528,7 @@ Each rule in the `semantic_token_rules` array is defined as follows:
 - `foreground_color`: The foreground color to use for the token type, in hex format (e.g., `"#ff0000"`).
 - `background_color`: The background color to use for the token type, in hex format (e.g., `"#ff0000"`).
 - `underline`: A boolean or color to underline with, in hex format. If `true`, then the token will be underlined with the text color.
-- `strikethrough`: A boolean or color to strikethrough with, in hex format. If `true`, then the token have a strikethrough with the text color.
+- `strikethrough`: A boolean or color to strikethrough with, in hex format. If `true`, then the token will have a strikethrough with the text color.
 - `font_weight`: One of `"normal"`, `"bold"`.
 - `font_style`: One of `"normal"`, `"italic"`.
 
