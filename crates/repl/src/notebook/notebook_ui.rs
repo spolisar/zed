@@ -848,11 +848,31 @@ impl NotebookEditor {
             return;
         }
 
+        let is_executing = match self
+            .cell_order
+            .get(self.selected_cell_index)
+            .and_then(|cell_id| self.cell_map.get(cell_id))
+        {
+            Some(Cell::Code(code_cell)) => code_cell.read(cx).is_executing(),
+            _ => false,
+        };
+
+        let (prompt_detail, del_choice) = if is_executing {
+            (
+                Some(
+                    "This cell is currently running. It will be interrupted before being deleted.",
+                ),
+                "Interrupt and Delete",
+            )
+        } else {
+            (None, "Delete")
+        };
+
         let prompt = window.prompt(
             PromptLevel::Warning,
             "Delete current cell?",
-            None,
-            &["Delete", "Cancel"],
+            prompt_detail,
+            &[del_choice, "Cancel"],
             cx,
         );
 
@@ -863,6 +883,9 @@ impl NotebookEditor {
             }
 
             this.update_in(cx, |this, window, cx| {
+                if is_executing {
+                    this.interrupt_kernel(&InterruptKernel, window, cx);
+                }
                 this.delete_current_cell_confirmed(window, cx);
             })?;
 
